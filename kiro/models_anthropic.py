@@ -28,6 +28,8 @@ Reference: https://docs.anthropic.com/en/api/messages
 
 import time
 from typing import Any, Dict, List, Literal, Optional, Union
+
+from loguru import logger
 from pydantic import BaseModel, Field, model_validator
 
 
@@ -294,6 +296,166 @@ class SystemContentBlock(BaseModel):
 SystemPrompt = Union[str, List[SystemContentBlock], List[Dict[str, Any]]]
 
 
+def _fold_system_role_messages(data: Any) -> Any:
+    """
+    Fold ``role: "system"`` entries from ``messages`` into the top-level ``system`` field.
+
+    Claude Code 2.1.156+ injects session/hook context (``<system-reminder>`` blocks,
+    current date, etc.) as ``role: "system"`` entries inside the ``messages`` array
+    instead of the top-level ``system`` field. The Anthropic Messages API rejects
+    those entries with a 422 because ``messages[].role`` must be ``"user"`` or
+    ``"assistant"``. This helper salvages the request by lifting their content into
+    ``system`` so the proxy still produces a spec-compliant payload.
+
+    The helper preserves cache markers: each folded message becomes a
+    ``SystemContentBlock``-shaped dict, and existing ``system`` content blocks are
+    kept intact. A pure-string ``system`` is upgraded to a list only when at least
+    one folded message contributes a block (so the simple "no folding needed" path
+    leaves the request untouched).
+
+    Args:
+        data: Raw request payload as a dict (running in pydantic ``mode="before"``).
+
+    Returns:
+        The same dict, mutated in place when folding happened. Non-dict inputs are
+        returned untouched so pydantic can produce its own validation error.
+    """
+    if not isinstance(data, dict):
+        return data
+
+    messages = data.get("messages")
+    if not isinstance(messages, list) or not messages:
+        return data
+
+    kept_messages: List[Any] = []
+    folded_blocks: List[Dict[str, Any]] = []
+    folded_count = 0
+
+    for msg in messages:
+        if isinstance(msg, dict):
+            role = msg.get("role")
+            content = msg.get("content")
+        else:
+            role = getattr(msg, "role", None)
+            content = getattr(msg, "content", None)
+
+        if role != "system":
+            kept_messages.append(msg)
+            continue
+
+        folded_count += 1
+        for block in _iter_system_blocks_from_content(content):
+            folded_blocks.append(block)
+
+    if folded_count == 0:
+        return data
+
+    if folded_blocks:
+        existing_blocks = _normalize_existing_system(data.get("system"))
+        data["system"] = existing_blocks + folded_blocks
+    data["messages"] = kept_messages
+
+    logger.debug(
+        f"Folded {folded_count} role='system' message(s) into top-level system field "
+        f"({len(folded_blocks)} block(s) added; system field "
+        f"{'updated' if folded_blocks else 'left unchanged because all blocks were empty'})"
+    )
+    return data
+
+
+def _iter_system_blocks_from_content(content: Any) -> List[Dict[str, Any]]:
+    """
+    Convert a folded message's ``content`` to a list of ``SystemContentBlock``-shaped dicts.
+
+    Accepts the two Anthropic content shapes (``str`` or ``list`` of blocks) plus
+    pydantic content-block instances. Image / tool_use / tool_result blocks inside
+    a ``role: "system"`` message are silently dropped because they have no meaning
+    as system context.
+
+    Args:
+        content: ``content`` value from a ``role: "system"`` message.
+
+    Returns:
+        Zero or more dicts of the form ``{"type": "text", "text": "..."}``, with
+        ``cache_control`` preserved when present on the source block.
+    """
+    if content is None:
+        return []
+
+    if isinstance(content, str):
+        if not content:
+            return []
+        return [{"type": "text", "text": content}]
+
+    if not isinstance(content, list):
+        return []
+
+    blocks: List[Dict[str, Any]] = []
+    for item in content:
+        if isinstance(item, dict):
+            if item.get("type") != "text":
+                continue
+            text = item.get("text", "")
+            if not isinstance(text, str) or not text:
+                continue
+            block: Dict[str, Any] = {"type": "text", "text": text}
+            cache_control = item.get("cache_control")
+            if cache_control is not None:
+                block["cache_control"] = cache_control
+            blocks.append(block)
+        else:
+            block_type = getattr(item, "type", None)
+            if block_type != "text":
+                continue
+            text = getattr(item, "text", "")
+            if not isinstance(text, str) or not text:
+                continue
+            block = {"type": "text", "text": text}
+            cache_control = getattr(item, "cache_control", None)
+            if cache_control is not None:
+                block["cache_control"] = cache_control
+            blocks.append(block)
+    return blocks
+
+
+def _normalize_existing_system(system: Any) -> List[Dict[str, Any]]:
+    """
+    Normalize the existing top-level ``system`` value to a list of block-shaped dicts.
+
+    Args:
+        system: Current value of ``system`` from the raw request payload.
+
+    Returns:
+        A list of ``{"type": "text", ...}`` dicts. Empty when ``system`` is missing
+        or empty. Non-text blocks (rare; not part of the Anthropic spec) are
+        passed through unchanged so we never drop user content silently.
+    """
+    if system is None:
+        return []
+    if isinstance(system, str):
+        if not system:
+            return []
+        return [{"type": "text", "text": system}]
+    if isinstance(system, list):
+        normalized: List[Dict[str, Any]] = []
+        for item in system:
+            if isinstance(item, dict):
+                normalized.append(item)
+            elif hasattr(item, "model_dump"):
+                normalized.append(item.model_dump(exclude_none=True))
+            else:
+                text = getattr(item, "text", None)
+                if text is None:
+                    continue
+                block: Dict[str, Any] = {"type": "text", "text": text}
+                cache_control = getattr(item, "cache_control", None)
+                if cache_control is not None:
+                    block["cache_control"] = cache_control
+                normalized.append(block)
+        return normalized
+    return []
+
+
 class AnthropicMessagesRequest(BaseModel):
     """
     Request to Anthropic Messages API (/v1/messages).
@@ -339,6 +501,17 @@ class AnthropicMessagesRequest(BaseModel):
 
     model_config = {"extra": "allow"}
 
+    @model_validator(mode="before")
+    @classmethod
+    def _fold_system_role_messages(cls, data: Any) -> Any:
+        """Fold ``role: "system"`` messages into the top-level ``system`` field.
+
+        See :func:`_fold_system_role_messages` for the full rationale (Claude
+        Code 2.1.156+ injects session context as ``role: "system"`` entries
+        that the Anthropic spec rejects).
+        """
+        return _fold_system_role_messages(data)
+
 
 class AnthropicCountTokensRequest(BaseModel):
     """
@@ -356,12 +529,23 @@ class AnthropicCountTokensRequest(BaseModel):
     
     model: str
     messages: List[AnthropicMessage] = Field(min_length=1)
-    
+
     # Optional parameters - only those that affect token count
     system: Optional[SystemPrompt] = None
     tools: Optional[List[AnthropicTool]] = None
-    
+
     model_config = {"extra": "allow"}
+
+    @model_validator(mode="before")
+    @classmethod
+    def _fold_system_role_messages(cls, data: Any) -> Any:
+        """Fold ``role: "system"`` messages into the top-level ``system`` field.
+
+        Same rationale as :class:`AnthropicMessagesRequest`. The
+        ``/v1/messages/count_tokens`` endpoint accepts the same payload shape
+        and would otherwise 422 on Claude Code 2.1.156+ requests.
+        """
+        return _fold_system_role_messages(data)
 
 
 # ==================================================================================================

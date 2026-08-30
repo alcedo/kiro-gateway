@@ -40,7 +40,9 @@ import httpx
 from fastapi.responses import JSONResponse, StreamingResponse
 from loguru import logger
 
+from kiro.config import PROFILE_ARN
 from kiro.tokenizer import count_message_tokens, count_tokens
+from kiro.utils import get_kiro_headers
 
 # Import debug_logger
 try:
@@ -126,6 +128,9 @@ async def call_kiro_mcp_api(
     tool_use_id = f"srvtoolu_{uuid.uuid4().hex[:32]}"
     
     # Build MCP request
+    # profileArn is required by runtime.kiro.dev for all auth types (see 07d24fc).
+    # It MUST be top-level: nested inside "params" the server does not see it and
+    # still answers 400 "profileArn is required for this request."
     mcp_request = {
         "id": request_id,
         "jsonrpc": "2.0",
@@ -133,7 +138,8 @@ async def call_kiro_mcp_api(
         "params": {
             "name": "web_search",
             "arguments": {"query": query}
-        }
+        },
+        "profileArn": getattr(auth_manager, "profile_arn", None) or PROFILE_ARN or ""
     }
     
     # Log MCP request
@@ -147,12 +153,16 @@ async def call_kiro_mcp_api(
     try:
         token = await auth_manager.get_access_token()
         
-        # EXACT headers from architecture
-        headers = {
-            "Authorization": f"Bearer {token}",
-            "x-amzn-codewhisperer-optout": "false",
-            "Content-Type": "application/json"
-        }
+        # Reuse the shared Kiro IDE header set. A minimal Authorization-only header
+        # set is rejected with 403 "User is not authorized to make this call." even
+        # when profileArn is present, so the MCP call must identify itself the same
+        # way every other gateway call does (KiroIDE User-Agent + fingerprint).
+        headers = get_kiro_headers(auth_manager, token)
+        # /mcp speaks JSON-RPC, not the x-amz-json-1.0 streaming protocol.
+        headers.pop("x-amz-target", None)
+        headers["Content-Type"] = "application/json"
+        headers["Accept"] = "application/json, text/event-stream"
+        headers["MCP-Protocol-Version"] = "2025-06-18"
         
         mcp_url = f"{auth_manager.q_host}/mcp"
         logger.debug(f"Calling MCP API: {mcp_url}")
@@ -161,7 +171,7 @@ async def call_kiro_mcp_api(
             response = await client.post(mcp_url, json=mcp_request, headers=headers)
             
             if response.status_code != 200:
-                logger.error(f"MCP API error: {response.status_code}")
+                logger.error(f"MCP API error: {response.status_code} - {response.text[:2000]}")
                 return None, None
             
             mcp_response = response.json()

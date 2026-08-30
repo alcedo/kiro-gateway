@@ -583,7 +583,25 @@ class TestFallbackModelsConfig:
         print("Verification: Contains at least one Claude model...")
         has_claude = any("claude" in mid.lower() for mid in model_ids)
         assert has_claude, "No Claude models in fallback list"
-    
+
+    def test_fallback_models_contain_opus_5(self):
+        """
+        What it does: Verifies that claude-opus-5 is present in the fallback list.
+        Purpose: The runtime.kiro.dev endpoint does not expose /ListAvailableModels,
+                 so FALLBACK_MODELS is the sole source for /v1/models discovery.
+                 claude-opus-5 must be listed to be advertised. Uses the canonical
+                 no-minor ID (matching claude-sonnet-4) so a client request for
+                 "claude-opus-5" resolves via the verified cache path, not passthrough.
+        """
+        print("Setup: Importing FALLBACK_MODELS...")
+        from kiro.config import FALLBACK_MODELS
+
+        model_ids = [m["modelId"] for m in FALLBACK_MODELS]
+        print(f"Model IDs in fallback list: {model_ids}")
+
+        print("Verification: claude-opus-5 present...")
+        assert "claude-opus-5" in model_ids, "claude-opus-5 missing from FALLBACK_MODELS"
+
     def test_fallback_models_use_dot_format(self):
         """
         What it does: Verifies that model IDs use dot format (e.g., claude-4.5).

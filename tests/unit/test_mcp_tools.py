@@ -190,6 +190,7 @@ class TestCallKiroMCPAPI:
         
         mock_response = Mock()
         mock_response.status_code = 500
+        mock_response.text = "Internal Server Error"
         
         mock_post = AsyncMock(return_value=mock_response)
         mock_client = AsyncMock()

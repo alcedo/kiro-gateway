@@ -1356,6 +1356,477 @@ class TestSystemContentBlock:
 
 
 # ==================================================================================================
+# Tests for AnthropicMessagesRequest system-folding (Claude Code 2.1.156+ compatibility)
+# ==================================================================================================
+
+class TestAnthropicMessagesRequestSystemFolding:
+    """
+    Tests for folding role='system' messages into the top-level system field.
+
+    Claude Code 2.1.156+ injects session context (<system-reminder> blocks,
+    current date, etc.) as role='system' entries inside messages[] instead of
+    the top-level system field. The Anthropic API rejects those entries with
+    a 422 because messages[].role must be 'user' or 'assistant'. The validator
+    salvages the request by lifting their content into system.
+    """
+
+    def test_no_system_messages_leaves_request_unchanged(self):
+        """
+        What it does: Verifies the validator is a no-op when no role='system' messages exist.
+        Purpose: Ensure the common case (well-formed Anthropic request) is not perturbed.
+        """
+        print("Setup: Building request with only user/assistant messages and a string system...")
+        request = AnthropicMessagesRequest(
+            model="claude-sonnet-4.5",
+            system="You are helpful.",
+            messages=[
+                {"role": "user", "content": "hi"},
+                {"role": "assistant", "content": "hello"},
+            ],
+            max_tokens=1024,
+        )
+
+        print(f"Comparing system: Expected 'You are helpful.', Got {request.system!r}")
+        assert request.system == "You are helpful."
+
+        print(f"Comparing messages length: Expected 2, Got {len(request.messages)}")
+        assert len(request.messages) == 2
+
+        print(f"Comparing roles: Expected ['user', 'assistant'], Got {[m.role for m in request.messages]}")
+        assert [m.role for m in request.messages] == ["user", "assistant"]
+
+    def test_folds_single_system_message_when_top_level_system_is_none(self):
+        """
+        What it does: Verifies a role='system' message with no existing system is lifted into a single block.
+        Purpose: Ensure the minimal Claude Code 2.1.156+ payload is salvaged.
+        """
+        print("Setup: Building request with one role='system' message and no top-level system...")
+        request = AnthropicMessagesRequest(
+            model="claude-sonnet-4.5",
+            messages=[
+                {"role": "system", "content": "Today's date is 2026-06-22."},
+                {"role": "user", "content": "what year is it"},
+            ],
+            max_tokens=1024,
+        )
+
+        print(f"Result system: {request.system}")
+        print(f"Comparing system type: Expected list, Got {type(request.system).__name__}")
+        assert isinstance(request.system, list)
+
+        print(f"Comparing folded block count: Expected 1, Got {len(request.system)}")
+        assert len(request.system) == 1
+
+        block = request.system[0]
+        print(f"Comparing block type: Expected 'text', Got '{block.type}'")
+        assert block.type == "text"
+
+        print(f"Comparing block text: Got {block.text!r}")
+        assert block.text == "Today's date is 2026-06-22."
+
+        print(f"Comparing remaining messages: Expected 1 user, Got {len(request.messages)} ({[m.role for m in request.messages]})")
+        assert len(request.messages) == 1
+        assert request.messages[0].role == "user"
+        assert request.messages[0].content == "what year is it"
+
+    def test_folds_multiple_system_messages_in_order(self):
+        """
+        What it does: Verifies multiple role='system' messages are folded in source order.
+        Purpose: Ensure the resulting system list preserves the order Claude Code sent.
+        """
+        print("Setup: Building request with three role='system' messages interleaved with a user turn...")
+        request = AnthropicMessagesRequest(
+            model="claude-sonnet-4.5",
+            messages=[
+                {"role": "system", "content": "first"},
+                {"role": "user", "content": "hi"},
+                {"role": "system", "content": "second"},
+                {"role": "system", "content": "third"},
+            ],
+            max_tokens=1024,
+        )
+
+        print(f"Result system: {request.system}")
+        assert isinstance(request.system, list)
+
+        texts = [b.text for b in request.system]
+        print(f"Comparing block texts: Expected ['first', 'second', 'third'], Got {texts}")
+        assert texts == ["first", "second", "third"]
+
+        print(f"Comparing remaining messages: Expected 1 user, Got {len(request.messages)} ({[m.role for m in request.messages]})")
+        assert len(request.messages) == 1
+        assert request.messages[0].role == "user"
+
+    def test_appends_folded_blocks_after_existing_string_system(self):
+        """
+        What it does: Verifies an existing string system is converted to a block and folded text is appended.
+        Purpose: Ensure existing user-supplied system context is preserved verbatim.
+        """
+        print("Setup: Building request with string system AND a role='system' message...")
+        request = AnthropicMessagesRequest(
+            model="claude-sonnet-4.5",
+            system="You are an expert.",
+            messages=[
+                {"role": "system", "content": "Today is 2026-06-22."},
+                {"role": "user", "content": "hi"},
+            ],
+            max_tokens=1024,
+        )
+
+        assert isinstance(request.system, list)
+        texts = [b.text for b in request.system]
+        print(f"Comparing block texts: Expected ['You are an expert.', 'Today is 2026-06-22.'], Got {texts}")
+        assert texts == ["You are an expert.", "Today is 2026-06-22."]
+
+    def test_appends_folded_blocks_after_existing_list_system(self):
+        """
+        What it does: Verifies an existing list-of-blocks system is preserved and folded blocks are appended.
+        Purpose: Ensure prompt-caching system content is not destroyed by folding.
+        """
+        print("Setup: Building request with list system carrying cache_control AND a role='system' message...")
+        request = AnthropicMessagesRequest(
+            model="claude-sonnet-4.5",
+            system=[
+                {"type": "text", "text": "Big cached preamble.", "cache_control": {"type": "ephemeral"}},
+            ],
+            messages=[
+                {"role": "system", "content": "Today is 2026-06-22."},
+                {"role": "user", "content": "hi"},
+            ],
+            max_tokens=1024,
+        )
+
+        assert isinstance(request.system, list)
+        print(f"Comparing block count: Expected 2, Got {len(request.system)}")
+        assert len(request.system) == 2
+
+        first = request.system[0]
+        print(f"Comparing first block text: Got {first.text!r}")
+        assert first.text == "Big cached preamble."
+        print(f"Comparing first block cache_control preserved: Got {first.cache_control}")
+        assert first.cache_control == {"type": "ephemeral"}
+
+        second = request.system[1]
+        print(f"Comparing second block text: Got {second.text!r}")
+        assert second.text == "Today is 2026-06-22."
+        print(f"Comparing second block cache_control: Expected None, Got {second.cache_control}")
+        assert second.cache_control is None
+
+    def test_preserves_cache_control_from_folded_message_block_content(self):
+        """
+        What it does: Verifies cache_control on a folded role='system' block content is preserved.
+        Purpose: Ensure prompt caching keeps working when Claude Code sends cached system context as a system role message.
+        """
+        print("Setup: Building request with role='system' carrying cache_control inside a content block...")
+        request = AnthropicMessagesRequest(
+            model="claude-sonnet-4.5",
+            messages=[
+                {
+                    "role": "system",
+                    "content": [
+                        {"type": "text", "text": "Cached context.", "cache_control": {"type": "ephemeral"}},
+                    ],
+                },
+                {"role": "user", "content": "hi"},
+            ],
+            max_tokens=1024,
+        )
+
+        assert isinstance(request.system, list)
+        block = request.system[0]
+        print(f"Comparing folded block text: Got {block.text!r}")
+        assert block.text == "Cached context."
+        print(f"Comparing folded block cache_control: Got {block.cache_control}")
+        assert block.cache_control == {"type": "ephemeral"}
+
+    def test_folds_list_content_with_multiple_text_blocks(self):
+        """
+        What it does: Verifies a role='system' message whose content is a list of text blocks is fanned out.
+        Purpose: Ensure each block's text becomes its own folded SystemContentBlock.
+        """
+        print("Setup: Building request with role='system' containing two text blocks...")
+        request = AnthropicMessagesRequest(
+            model="claude-sonnet-4.5",
+            messages=[
+                {
+                    "role": "system",
+                    "content": [
+                        {"type": "text", "text": "block one"},
+                        {"type": "text", "text": "block two"},
+                    ],
+                },
+                {"role": "user", "content": "hi"},
+            ],
+            max_tokens=1024,
+        )
+
+        texts = [b.text for b in request.system]
+        print(f"Comparing block texts: Expected ['block one', 'block two'], Got {texts}")
+        assert texts == ["block one", "block two"]
+
+    def test_skips_non_text_blocks_inside_folded_messages(self):
+        """
+        What it does: Verifies image/tool_use blocks inside a role='system' message are silently dropped.
+        Purpose: Those blocks have no meaning as system context and would not validate as SystemContentBlock.
+        """
+        print("Setup: Building request with role='system' containing a text block and a non-text block...")
+        request = AnthropicMessagesRequest(
+            model="claude-sonnet-4.5",
+            messages=[
+                {
+                    "role": "system",
+                    "content": [
+                        {"type": "text", "text": "real text"},
+                        {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "ZmFrZQ=="}},
+                    ],
+                },
+                {"role": "user", "content": "hi"},
+            ],
+            max_tokens=1024,
+        )
+
+        texts = [b.text for b in request.system]
+        print(f"Comparing block texts: Expected ['real text'], Got {texts}")
+        assert texts == ["real text"]
+
+    def test_skips_empty_string_content(self):
+        """
+        What it does: Verifies a role='system' message with empty string content does not produce a block.
+        Purpose: Avoid emitting empty system blocks that would waste tokens and look odd in logs.
+        """
+        print("Setup: Building request with one empty role='system' message and one with text...")
+        request = AnthropicMessagesRequest(
+            model="claude-sonnet-4.5",
+            messages=[
+                {"role": "system", "content": ""},
+                {"role": "system", "content": "real text"},
+                {"role": "user", "content": "hi"},
+            ],
+            max_tokens=1024,
+        )
+
+        texts = [b.text for b in request.system]
+        print(f"Comparing block texts: Expected ['real text'], Got {texts}")
+        assert texts == ["real text"]
+
+    def test_only_empty_system_messages_leaves_system_unchanged(self):
+        """
+        What it does: Verifies a role='system' message that yields zero blocks does not touch top-level system.
+        Purpose: Stay a no-op when there is nothing meaningful to fold.
+        """
+        print("Setup: Building request with only an empty role='system' message...")
+        request = AnthropicMessagesRequest(
+            model="claude-sonnet-4.5",
+            system="Original system.",
+            messages=[
+                {"role": "system", "content": ""},
+                {"role": "user", "content": "hi"},
+            ],
+            max_tokens=1024,
+        )
+
+        print(f"Comparing system: Expected 'Original system.' string, Got {request.system!r}")
+        assert request.system == "Original system."
+        print(f"Comparing remaining messages: Expected 1 user, Got {len(request.messages)} ({[m.role for m in request.messages]})")
+        assert len(request.messages) == 1
+        assert request.messages[0].role == "user"
+
+    def test_request_with_only_system_and_user_messages_validates(self):
+        """
+        What it does: Verifies that even when role='system' is the very first message, validation still passes after folding.
+        Purpose: Reproduce the exact 422 error from Claude Code 2.1.156+ and confirm it is fixed.
+        """
+        print("Setup: Reproducing Claude Code 2.1.156+ payload (system at index 0)...")
+        request = AnthropicMessagesRequest(
+            model="claude-opus-4-8",
+            messages=[
+                {"role": "user", "content": "hi"},
+                {
+                    "role": "system",
+                    "content": "<system-reminder>\nAs you answer the user's questions, you can use the following context:\n# currentDate\nToday's date is 2026-06-22.\n</system-reminder>",
+                },
+            ],
+            max_tokens=1024,
+        )
+
+        print(f"Comparing message roles: Expected ['user'], Got {[m.role for m in request.messages]}")
+        assert [m.role for m in request.messages] == ["user"]
+        assert isinstance(request.system, list)
+        print(f"Comparing folded text contains 'currentDate': {request.system[0].text!r}")
+        assert "currentDate" in request.system[0].text
+
+    def test_extra_fields_on_system_message_do_not_break_folding(self):
+        """
+        What it does: Verifies role='system' messages with unexpected extra fields are still folded.
+        Purpose: Future-proof against Claude Code adding metadata to system entries.
+        """
+        print("Setup: Building request with a role='system' message carrying extra fields...")
+        request = AnthropicMessagesRequest(
+            model="claude-sonnet-4.5",
+            messages=[
+                {
+                    "role": "system",
+                    "content": "context",
+                    "ttl": 3600,
+                    "source": "claude-code",
+                },
+                {"role": "user", "content": "hi"},
+            ],
+            max_tokens=1024,
+        )
+
+        assert isinstance(request.system, list)
+        print(f"Comparing folded text: Got {request.system[0].text!r}")
+        assert request.system[0].text == "context"
+        print(f"Comparing remaining messages: Got {[m.role for m in request.messages]}")
+        assert [m.role for m in request.messages] == ["user"]
+
+    def test_folded_system_blocks_still_validate_as_system_content_block(self):
+        """
+        What it does: Verifies the dicts the validator emits parse cleanly into SystemContentBlock instances.
+        Purpose: Ensure the type annotation List[SystemContentBlock] is honored, not Dict[str, Any].
+        """
+        print("Setup: Folding a role='system' message and inspecting its instance type...")
+        request = AnthropicMessagesRequest(
+            model="claude-sonnet-4.5",
+            messages=[
+                {"role": "system", "content": "a"},
+                {"role": "user", "content": "hi"},
+            ],
+            max_tokens=1024,
+        )
+
+        block = request.system[0]
+        print(f"Comparing instance type: Expected SystemContentBlock, Got {type(block).__name__}")
+        assert isinstance(block, SystemContentBlock)
+
+    def test_empty_messages_list_raises_validation_error(self):
+        """
+        What it does: Verifies the validator does not accidentally allow empty messages after folding everything.
+        Purpose: A request whose messages were entirely role='system' should still hit the min_length=1 guard.
+        """
+        print("Setup: Building request whose only message is role='system' (after fold, messages would be empty)...")
+        print("Action: Creating model (should raise ValidationError)...")
+        with pytest.raises(ValidationError) as exc_info:
+            AnthropicMessagesRequest(
+                model="claude-sonnet-4.5",
+                messages=[
+                    {"role": "system", "content": "context"},
+                ],
+                max_tokens=1024,
+            )
+
+        print(f"ValidationError raised: {exc_info.value}")
+        assert "messages" in str(exc_info.value)
+
+    def test_skips_block_with_non_string_text(self):
+        """
+        What it does: Verifies a role='system' block whose `text` is not a string is dropped, not propagated.
+        Purpose: Prevent malformed input from degrading system into List[Dict] or crashing extract_system_prompt downstream.
+        """
+        print("Setup: Building request with role='system' carrying a block whose text is an int...")
+        request = AnthropicMessagesRequest(
+            model="claude-sonnet-4.5",
+            messages=[
+                {
+                    "role": "system",
+                    "content": [
+                        {"type": "text", "text": 42},
+                        {"type": "text", "text": "kept"},
+                    ],
+                },
+                {"role": "user", "content": "hi"},
+            ],
+            max_tokens=1024,
+        )
+
+        assert isinstance(request.system, list)
+        texts = [b.text for b in request.system]
+        print(f"Comparing block texts: Expected ['kept'], Got {texts}")
+        assert texts == ["kept"]
+
+        for block in request.system:
+            print(f"Comparing block instance: Expected SystemContentBlock, Got {type(block).__name__}")
+            assert isinstance(block, SystemContentBlock)
+
+    def test_user_role_message_with_unusual_content_passes_through(self):
+        """
+        What it does: Verifies the validator does not touch role='user' or role='assistant' messages.
+        Purpose: Make sure the validator scope is strictly role=='system'.
+        """
+        print("Setup: Building request with a user message that happens to look like system content...")
+        request = AnthropicMessagesRequest(
+            model="claude-sonnet-4.5",
+            messages=[
+                {"role": "user", "content": [{"type": "text", "text": "<system-reminder>fake</system-reminder>"}]},
+            ],
+            max_tokens=1024,
+        )
+
+        print(f"Comparing system: Expected None, Got {request.system!r}")
+        assert request.system is None
+        print(f"Comparing message count: Expected 1, Got {len(request.messages)}")
+        assert len(request.messages) == 1
+        assert request.messages[0].role == "user"
+
+
+# ==================================================================================================
+# Tests for AnthropicCountTokensRequest system-folding (parity with messages endpoint)
+# ==================================================================================================
+
+class TestAnthropicCountTokensRequestSystemFolding:
+    """
+    Tests that AnthropicCountTokensRequest applies the same role='system' folding as the messages endpoint.
+
+    Claude Code 2.1.156+ also hits /v1/messages/count_tokens with the same payload
+    shape; without folding it would 422 there too.
+    """
+
+    def test_folds_system_message_into_top_level_system(self):
+        """
+        What it does: Verifies count_tokens request also folds role='system' messages.
+        Purpose: Maintain feature consistency across both Anthropic endpoints (AGENTS.md #10).
+        """
+        from kiro.models_anthropic import AnthropicCountTokensRequest
+
+        print("Setup: Building count_tokens request with a role='system' message...")
+        request = AnthropicCountTokensRequest(
+            model="claude-sonnet-4.5",
+            messages=[
+                {"role": "system", "content": "Today is 2026-06-22."},
+                {"role": "user", "content": "estimate me"},
+            ],
+        )
+
+        assert isinstance(request.system, list)
+        print(f"Comparing folded text: Got {request.system[0].text!r}")
+        assert request.system[0].text == "Today is 2026-06-22."
+        print(f"Comparing remaining roles: Got {[m.role for m in request.messages]}")
+        assert [m.role for m in request.messages] == ["user"]
+
+    def test_no_system_messages_leaves_count_tokens_request_unchanged(self):
+        """
+        What it does: Verifies the validator is a no-op for well-formed count_tokens payloads.
+        Purpose: Match the messages endpoint's behavior on the common path.
+        """
+        from kiro.models_anthropic import AnthropicCountTokensRequest
+
+        print("Setup: Building count_tokens request with only user/assistant messages...")
+        request = AnthropicCountTokensRequest(
+            model="claude-sonnet-4.5",
+            system="You are helpful.",
+            messages=[
+                {"role": "user", "content": "hi"},
+            ],
+        )
+
+        print(f"Comparing system: Expected 'You are helpful.', Got {request.system!r}")
+        assert request.system == "You are helpful."
+        print(f"Comparing message count: Expected 1, Got {len(request.messages)}")
+        assert len(request.messages) == 1
+
+
+# ==================================================================================================
 # Tests for AnthropicUsage
 # ==================================================================================================
 
