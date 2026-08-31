@@ -27,9 +27,6 @@ services:
       # Option 3: Credentials file path (mounted as volume below)
       - KIRO_CREDS_FILE=${KIRO_CREDS_FILE:-}
       
-      # Option 4: kiro-cli SQLite database (mounted as volume below)
-      - KIRO_CLI_DB_FILE=${KIRO_CLI_DB_FILE:-}
-      
       # Optional settings
       - KIRO_REGION=${KIRO_REGION:-us-east-1}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
@@ -40,7 +37,7 @@ services:
     
     # Alternative: Load all variables from .env file
     env_file:
-      - .env
+      - .dockerenv
     
     volumes:
       # Mount credentials file (if using KIRO_CREDS_FILE)
@@ -51,6 +48,9 @@ services:
       # Uncomment and adjust path as needed:
       # - ~/.local/share/kiro-cli:/home/kiro/.local/share/kiro-cli  # Linux/macOS
       
+      # Mount kiro-cli database
+      - "/Users/jolly/Library/Application Support/kiro-cli:/host-kiro-cli:ro"
+
       # Mount debug logs directory (optional, for debugging)
       - ./debug_logs:/app/debug_logs
     
