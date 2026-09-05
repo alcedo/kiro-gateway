@@ -95,12 +95,7 @@ class ToolReferenceContentBlock(BaseModel):
 
 
 class ServerToolUseContentBlock(BaseModel):
-    """
-    Anthropic server-side tool call (web_search, web_fetch, code_execution).
-
-    These blocks live on the assistant message. They are not client tool_use
-    and must not be forwarded to Kiro as toolUses.
-    """
+    """Anthropic server-side tool call (`web_search`, `web_fetch`, `code_execution`)."""
 
     type: Literal["server_tool_use"] = "server_tool_use"
     id: str
@@ -111,11 +106,7 @@ class ServerToolUseContentBlock(BaseModel):
 
 
 class WebSearchToolResultContentBlock(BaseModel):
-    """
-    Result of an Anthropic web_search server tool.
-
-    Appears on the same assistant message as the matching server_tool_use.
-    """
+    """Result payload of an Anthropic `web_search` server tool."""
 
     type: Literal["web_search_tool_result"] = "web_search_tool_result"
     tool_use_id: str
@@ -125,11 +116,7 @@ class WebSearchToolResultContentBlock(BaseModel):
 
 
 class UnknownContentBlock(BaseModel):
-    """
-    Catch-all for Anthropic content types the gateway does not model yet.
-
-    Kept last in ContentBlock so known Literal types still win.
-    """
+    """Anthropic content block whose `type` has no dedicated model."""
 
     type: str
 

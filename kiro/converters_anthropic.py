@@ -46,7 +46,6 @@ from kiro.converters_core import (
 
 
 def _content_block_as_dict(block: Any) -> Dict[str, Any]:
-    """Return a content block as a plain dict."""
     if isinstance(block, dict):
         return block
     dump = getattr(block, "model_dump", None)
@@ -56,14 +55,12 @@ def _content_block_as_dict(block: Any) -> Dict[str, Any]:
 
 
 def _content_block_type(block: Any) -> str:
-    """Return the Anthropic content-block type string."""
     if isinstance(block, dict):
         return str(block.get("type") or "")
     return str(getattr(block, "type", "") or "")
 
 
 def _text_from_server_tool_use(block: Any) -> str:
-    """Fold a server_tool_use block into a short citation line."""
     data = _content_block_as_dict(block)
     name = data.get("name") or "tool"
     raw_input = data.get("input") or {}
@@ -76,7 +73,6 @@ def _text_from_server_tool_use(block: Any) -> str:
 
 
 def _text_from_server_tool_result(content: Any) -> str:
-    """Fold web_search_result rows (or similar) into title/url lines."""
     if isinstance(content, str):
         return content
     items: List[Any]
@@ -108,10 +104,6 @@ def convert_anthropic_content_to_text(content: Any) -> str:
     Anthropic content can be:
     - String: "Hello, world!"
     - List of content blocks: [{"type": "text", "text": "Hello"}]
-
-    Server-tool blocks (web_search and later siblings) are folded into text
-    so Kiro history keeps the citations. Client tool_use / tool_result stay
-    out of the text and are handled as structured tool fields.
 
     Args:
         content: Anthropic message content
@@ -308,7 +300,9 @@ def extract_tool_uses_from_anthropic_content(content: Any) -> List[Dict[str, Any
             tool_name = getattr(block, "name", None)
             tool_input = getattr(block, "input", {})
 
-        if block_type == "tool_use" and tool_id and tool_name:
+        if block_type != "tool_use":
+            continue
+        if tool_id and tool_name:
             tool_calls.append(
                 {
                     "id": tool_id,
