@@ -45,6 +45,62 @@ from kiro.converters_core import (
 )
 
 
+def _content_block_as_dict(block: Any) -> Dict[str, Any]:
+    """Return a content block as a plain dict."""
+    if isinstance(block, dict):
+        return block
+    dump = getattr(block, "model_dump", None)
+    if callable(dump):
+        return dump()
+    return {}
+
+
+def _content_block_type(block: Any) -> str:
+    """Return the Anthropic content-block type string."""
+    if isinstance(block, dict):
+        return str(block.get("type") or "")
+    return str(getattr(block, "type", "") or "")
+
+
+def _text_from_server_tool_use(block: Any) -> str:
+    """Fold a server_tool_use block into a short citation line."""
+    data = _content_block_as_dict(block)
+    name = data.get("name") or "tool"
+    raw_input = data.get("input") or {}
+    query = ""
+    if isinstance(raw_input, dict):
+        query = raw_input.get("query") or raw_input.get("url") or ""
+    if query:
+        return f"[{name}: {query}]"
+    return f"[{name}]"
+
+
+def _text_from_server_tool_result(content: Any) -> str:
+    """Fold web_search_result rows (or similar) into title/url lines."""
+    if isinstance(content, str):
+        return content
+    items: List[Any]
+    if isinstance(content, list):
+        items = content
+    elif content:
+        items = [content]
+    else:
+        items = []
+    lines: List[str] = []
+    for item in items:
+        if isinstance(item, dict):
+            title = item.get("title") or ""
+            url = item.get("url") or ""
+        else:
+            title = getattr(item, "title", "") or ""
+            url = getattr(item, "url", "") or ""
+        if title and url:
+            lines.append(f"{title} ({url})")
+        elif title or url:
+            lines.append(str(title or url))
+    return "\n".join(lines)
+
+
 def convert_anthropic_content_to_text(content: Any) -> str:
     """
     Extracts text content from Anthropic message content.
@@ -52,6 +108,10 @@ def convert_anthropic_content_to_text(content: Any) -> str:
     Anthropic content can be:
     - String: "Hello, world!"
     - List of content blocks: [{"type": "text", "text": "Hello"}]
+
+    Server-tool blocks (web_search and later siblings) are folded into text
+    so Kiro history keeps the citations. Client tool_use / tool_result stay
+    out of the text and are handled as structured tool fields.
 
     Args:
         content: Anthropic message content
@@ -65,11 +125,21 @@ def convert_anthropic_content_to_text(content: Any) -> str:
     if isinstance(content, list):
         text_parts = []
         for block in content:
-            if isinstance(block, dict):
-                if block.get("type") == "text":
+            block_type = _content_block_type(block)
+            if block_type == "text":
+                if isinstance(block, dict):
                     text_parts.append(block.get("text", ""))
-            elif hasattr(block, "type") and block.type == "text":
-                text_parts.append(block.text)
+                else:
+                    text_parts.append(getattr(block, "text", "") or "")
+            elif block_type == "server_tool_use":
+                folded = _text_from_server_tool_use(block)
+                if folded:
+                    text_parts.append(f"\n{folded}")
+            elif block_type.endswith("_tool_result") and block_type != "tool_result":
+                data = _content_block_as_dict(block)
+                folded = _text_from_server_tool_result(data.get("content"))
+                if folded:
+                    text_parts.append(f"\n{folded}")
         return "".join(text_parts)
 
     return str(content) if content else ""
