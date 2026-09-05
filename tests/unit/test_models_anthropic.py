@@ -388,6 +388,128 @@ class TestContentBlockUnion:
         assert block.type == "tool_result"
 
 
+class TestAnthropicMessageWithServerToolBlocks:
+    """Claude Code replays Anthropic web_search blocks on the next turn."""
+
+    def test_request_accepts_web_search_history(self):
+        """
+        What it does: Parses a follow-up request whose assistant message
+        contains server_tool_use and web_search_tool_result.
+        Purpose: Claude Code web_search history must not 422.
+        """
+        request = AnthropicMessagesRequest.model_validate(
+            {
+                "model": "claude-sonnet-4.5",
+                "max_tokens": 1024,
+                "messages": [
+                    {"role": "user", "content": "Singapore news today"},
+                    {
+                        "role": "assistant",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": "I'll search for Singapore news and then create a Notion page.",
+                            },
+                            {
+                                "id": "srvtoolu_27451f1cc6624ddbb562b88c44704f95",
+                                "type": "server_tool_use",
+                                "name": "web_search",
+                                "input": {"query": "Singapore news September 5 2026"},
+                            },
+                            {
+                                "type": "web_search_tool_result",
+                                "tool_use_id": "srvtoolu_27451f1cc6624ddbb562b88c44704f95",
+                                "content": [
+                                    {
+                                        "type": "web_search_result",
+                                        "title": "Morning Briefing: Top stories from The Straits Times on Sept 5, 2026",
+                                        "url": "https://www.straitstimes.com/newsletter/morning-briefing-top-stories-from-the-straits-times-on-sept-5-2026",
+                                        "encrypted_content": "Pyramid selling is illegal here.",
+                                        "page_age": None,
+                                    }
+                                ],
+                            },
+                        ],
+                    },
+                    {"role": "user", "content": "Create the Notion page now."},
+                ],
+            }
+        )
+
+        assistant = request.messages[1]
+        assert isinstance(assistant.content, list)
+        assert len(assistant.content) == 3
+        assert assistant.content[1].type == "server_tool_use"
+        assert assistant.content[1].name == "web_search"
+        assert assistant.content[2].type == "web_search_tool_result"
+
+    def test_request_accepts_unknown_server_tool_block(self):
+        """
+        What it does: Parses an assistant block with a future server-tool type.
+        Purpose: The next Anthropic server tool must not 422 at the boundary.
+        """
+        message = AnthropicMessage.model_validate(
+            {
+                "role": "assistant",
+                "content": [
+                    {"type": "text", "text": "Fetching the page."},
+                    {
+                        "type": "web_fetch_tool_result",
+                        "tool_use_id": "srvtoolu_fetch_1",
+                        "content": {"url": "https://example.com", "status": 200},
+                    },
+                ],
+            }
+        )
+
+        assert isinstance(message.content, list)
+        assert message.content[1].type == "web_fetch_tool_result"
+
+    def test_unknown_block_does_not_steal_tool_use(self):
+        """
+        What it does: Parses a normal tool_use block after UnknownContentBlock exists.
+        Purpose: The catch-all must stay last in the union.
+        """
+        message = AnthropicMessage.model_validate(
+            {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "call_123",
+                        "name": "get_weather",
+                        "input": {"location": "Singapore"},
+                    }
+                ],
+            }
+        )
+
+        assert isinstance(message.content, list)
+        assert message.content[0].type == "tool_use"
+        assert message.content[0].name == "get_weather"
+
+    def test_incomplete_server_tool_use_still_parses(self):
+        """
+        What it does: Parses server_tool_use that is missing id.
+        Purpose: The catch-all must not 422 on a partial Anthropic server block.
+        """
+        message = AnthropicMessage.model_validate(
+            {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "server_tool_use",
+                        "name": "web_search",
+                        "input": {"query": "x"},
+                    }
+                ],
+            }
+        )
+
+        assert isinstance(message.content, list)
+        assert message.content[0].type == "server_tool_use"
+
+
 # ==================================================================================================
 # Tests for AnthropicMessage with Image Content (Issue #30 fix verification)
 # ==================================================================================================

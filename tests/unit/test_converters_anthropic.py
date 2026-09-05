@@ -112,6 +112,67 @@ class TestConvertAnthropicContentToText:
         print(f"Comparing result: Expected 'Hello World', Got '{result}'")
         assert result == "Hello World"
 
+    def test_flattens_web_search_history_to_text(self):
+        """
+        What it does: Folds server_tool_use and web_search_tool_result into text.
+        Purpose: Kiro history has no server-tool blocks. Search citations must survive.
+        """
+        content = [
+            {"type": "text", "text": "I'll search for Singapore news."},
+            {
+                "type": "server_tool_use",
+                "id": "srvtoolu_1",
+                "name": "web_search",
+                "input": {"query": "Singapore news September 5 2026"},
+            },
+            {
+                "type": "web_search_tool_result",
+                "tool_use_id": "srvtoolu_1",
+                "content": [
+                    {
+                        "type": "web_search_result",
+                        "title": "Morning Briefing",
+                        "url": "https://www.straitstimes.com/newsletter/morning-briefing",
+                    }
+                ],
+            },
+        ]
+
+        result = convert_anthropic_content_to_text(content)
+
+        assert "I'll search for Singapore news." in result
+        assert "Singapore news September 5 2026" in result
+        assert "Morning Briefing" in result
+        assert "https://www.straitstimes.com/newsletter/morning-briefing" in result
+
+    def test_flattens_server_tool_use_without_query(self):
+        """
+        What it does: Folds a server_tool_use that has no query field.
+        Purpose: Empty input must still produce a name marker, not crash.
+        """
+        result = convert_anthropic_content_to_text(
+            [{"type": "server_tool_use", "id": "srvtoolu_1", "name": "web_search", "input": {}}]
+        )
+
+        assert "[web_search]" in result
+
+    def test_flattens_web_search_error_string(self):
+        """
+        What it does: Folds a string web_search_tool_result payload.
+        Purpose: Anthropic error results are strings, not result rows.
+        """
+        result = convert_anthropic_content_to_text(
+            [
+                {
+                    "type": "web_search_tool_result",
+                    "tool_use_id": "srvtoolu_1",
+                    "content": "Search failed: rate limited",
+                }
+            ]
+        )
+
+        assert "Search failed: rate limited" in result
+
     def test_handles_none(self):
         """
         What it does: Verifies None handling.
@@ -909,6 +970,24 @@ class TestExtractToolUsesFromAnthropicContent:
         print(f"Comparing result: Expected [], Got {result}")
         assert result == []
 
+    def test_does_not_extract_server_tool_use_as_client_tool(self):
+        """
+        What it does: Leaves server_tool_use out of unified tool_calls.
+        Purpose: Kiro toolUses need a matching user toolResult. Server tools do not.
+        """
+        content = [
+            {
+                "type": "server_tool_use",
+                "id": "srvtoolu_1",
+                "name": "web_search",
+                "input": {"query": "Singapore news"},
+            }
+        ]
+
+        result = extract_tool_uses_from_anthropic_content(content)
+
+        assert result == []
+
     def test_skips_tool_use_without_id(self):
         """
         What it does: Verifies that tool_use without id is skipped.
@@ -1034,6 +1113,47 @@ class TestConvertAnthropicMessages:
         assert result[0].tool_calls is not None
         assert len(result[0].tool_calls) == 1
         assert result[0].tool_calls[0]["function"]["name"] == "get_weather"
+
+    def test_folds_web_search_history_without_client_tool_calls(self):
+        """
+        What it does: Converts a parsed web_search assistant turn to text only.
+        Purpose: Citations survive. Kiro does not get a matching-less toolUse.
+        """
+        messages = [
+            AnthropicMessage.model_validate(
+                {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "text", "text": "I'll search first."},
+                        {
+                            "type": "server_tool_use",
+                            "id": "srvtoolu_1",
+                            "name": "web_search",
+                            "input": {"query": "Singapore news"},
+                        },
+                        {
+                            "type": "web_search_tool_result",
+                            "tool_use_id": "srvtoolu_1",
+                            "content": [
+                                {
+                                    "type": "web_search_result",
+                                    "title": "Morning Briefing",
+                                    "url": "https://www.straitstimes.com/newsletter/morning-briefing",
+                                }
+                            ],
+                        },
+                    ],
+                }
+            )
+        ]
+
+        result = convert_anthropic_messages(messages)
+
+        assert len(result) == 1
+        assert result[0].tool_calls is None
+        assert "I'll search first." in result[0].content
+        assert "Singapore news" in result[0].content
+        assert "Morning Briefing" in result[0].content
 
     def test_converts_user_message_with_tool_result(self):
         """

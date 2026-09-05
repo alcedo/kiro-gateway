@@ -527,10 +527,48 @@ class TestMessagesContentBlocks:
         print(f"Status: {response.status_code}")
         assert response.status_code != 422
 
+    def test_accepts_web_search_history_blocks(self, test_client, valid_proxy_api_key):
+        """
+        What it does: POSTs an assistant turn with Anthropic web_search blocks.
+        Purpose: Follow-up Claude Code turns must pass FastAPI validation.
+        """
+        response = test_client.post(
+            "/v1/messages",
+            headers={"x-api-key": valid_proxy_api_key},
+            json={
+                "model": "claude-sonnet-4-5",
+                "max_tokens": 1024,
+                "messages": [
+                    {"role": "user", "content": "Singapore news today"},
+                    {
+                        "role": "assistant",
+                        "content": [
+                            {"type": "text", "text": "I'll search first."},
+                            {
+                                "id": "srvtoolu_1",
+                                "type": "server_tool_use",
+                                "name": "web_search",
+                                "input": {"query": "Singapore news September 5 2026"},
+                            },
+                            {
+                                "type": "web_search_tool_result",
+                                "tool_use_id": "srvtoolu_1",
+                                "content": [
+                                    {
+                                        "type": "web_search_result",
+                                        "title": "Morning Briefing",
+                                        "url": "https://www.straitstimes.com/newsletter/morning-briefing",
+                                    }
+                                ],
+                            },
+                        ],
+                    },
+                    {"role": "user", "content": "Create the Notion page now."},
+                ],
+            },
+        )
 
-# =============================================================================
-# Tests for /v1/messages tool use
-# =============================================================================
+        assert response.status_code != 422
 
 class TestMessagesToolUse:
     """Tests for tool use on /v1/messages endpoint."""
